@@ -1,6 +1,7 @@
 #undef UNICODE
 #undef _UNICODE
 #include <windows.h>
+#define _USE_MATH_DEFINES
 #include <cmath>
 #include <thread>
 #include <vector>
@@ -33,40 +34,47 @@ const int keySpacing = 10;
 // Audio constants
 const int SAMPLE_RATE = 44100;
 
-// Audio thread function
+double phases[keyCount] = {0};  // global phase for each note
+HWAVEOUT hWave;
+
 DWORD WINAPI AudioThread(LPVOID) {
+    WAVEFORMATEX wf = {};
+    wf.wFormatTag = WAVE_FORMAT_PCM;
+    wf.nChannels = 1;
+    wf.nSamplesPerSec = SAMPLE_RATE;
+    wf.wBitsPerSample = 16;
+    wf.nBlockAlign = wf.nChannels * wf.wBitsPerSample / 8;
+    wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
+    waveOutOpen(&hWave, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL);
+
+    std::vector<short> buffer(SAMPLE_RATE / 20); // 50ms
+
     while (true) {
-        std::vector<short> buffer(SAMPLE_RATE / 20); // 50ms buffer
-        for (size_t i = 0; i < buffer.size(); ++i) buffer[i] = 0;
+        std::fill(buffer.begin(), buffer.end(), 0);
 
         for (int k = 0; k < keyCount; ++k) {
             if (!keyPressed[k]) continue;
+            double freq = keyNotes[k].freq;
             for (size_t i = 0; i < buffer.size(); ++i) {
-                buffer[i] += (short)(3000 * sin(2 * 3.14159265359 * keyNotes[k].freq * i / SAMPLE_RATE));
+                phases[k] += 2.0 * M_PI * freq / SAMPLE_RATE;
+                if (phases[k] > 2.0 * M_PI) phases[k] -= 2.0 * M_PI;
+                buffer[i] += (short)(3000 * sin(phases[k]));
             }
         }
 
-        WAVEFORMATEX wf = {};
-        wf.wFormatTag = WAVE_FORMAT_PCM;
-        wf.nChannels = 1;
-        wf.nSamplesPerSec = SAMPLE_RATE;
-        wf.wBitsPerSample = 16;
-        wf.nBlockAlign = wf.nChannels * wf.wBitsPerSample / 8;
-        wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-
-        HWAVEOUT hWave;
-        waveOutOpen(&hWave, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL);
         WAVEHDR wh = {};
         wh.lpData = (LPSTR)buffer.data();
         wh.dwBufferLength = buffer.size() * sizeof(short);
         waveOutPrepareHeader(hWave, &wh, sizeof(wh));
         waveOutWrite(hWave, &wh, sizeof(wh));
+
+        // wait for buffer duration before reusing
         Sleep(50);
         waveOutUnprepareHeader(hWave, &wh, sizeof(wh));
-        waveOutClose(hWave);
     }
     return 0;
 }
+
 
 // Draw the keys and their states
 void DrawKeys(HDC hdc, HWND hwnd) {
@@ -94,10 +102,6 @@ void DrawKeys(HDC hdc, HWND hwnd) {
         char keyChar[2] = { (char)keyNotes[i].vk, 0 };
         TextOutA(hdc, x + keyWidth/2 - 5, y + 5, keyChar, 1);
         TextOutA(hdc, x + 2, y + keyHeight/2, keyNotes[i].note, lstrlenA(keyNotes[i].note));
-
-        char freqStr[16];
-        sprintf(freqStr,"%.1f Hz", keyNotes[i].freq);
-        TextOutA(hdc, x + 2, y + keyHeight - 15, freqStr, lstrlenA(freqStr));
     }
 }
 
