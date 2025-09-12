@@ -1,13 +1,17 @@
 #undef UNICODE
 #undef _UNICODE
+#define WIN32_LEAN_AND_MEAN
+#define _WIN32_IE 0x0600
 #include <windows.h>
-#define _USE_MATH_DEFINES
+#include <mmsystem.h>
+#include <commctrl.h>
 #include <cmath>
 #include <thread>
 #include <vector>
 #include <atomic>
 
-// Key mapping to notes
+
+// --- Key mapping ---
 struct KeyNote {
     int vk;          // virtual key
     const char* note;
@@ -20,23 +24,26 @@ KeyNote keyNotes[] = {
     {'6',"G#4/Ab4",415.30}, {'Y',"A4",440.00}, {'7',"A#4/Bb4",466.16}, {'U',"B4",493.88},
     {'I',"C5",523.25}
 };
-
 const int keyCount = sizeof(keyNotes)/sizeof(KeyNote);
 
-// Key press state (volatile for thread safety)
-volatile bool keyPressed[sizeof(keyNotes)/sizeof(KeyNote)] = {0};
+// --- Key press state ---
+volatile bool keyPressed[keyCount] = {0};
 
-// Window constants
+// --- Window constants ---
 const int keyWidth = 40;
 const int keyHeight = 40;
 const int keySpacing = 10;
 
-// Audio constants
+// --- Audio constants ---
 const int SAMPLE_RATE = 44100;
-
-double phases[keyCount] = {0};  // global phase for each note
+double phases[keyCount] = {0};
 HWAVEOUT hWave;
 
+// --- Gain control ---
+std::atomic<float> gain(1.0f); // 0.0 to 2.0
+HWND hSlider; // slider handle
+
+// --- Audio thread ---
 DWORD WINAPI AudioThread(LPVOID) {
     WAVEFORMATEX wf = {};
     wf.wFormatTag = WAVE_FORMAT_PCM;
@@ -45,8 +52,8 @@ DWORD WINAPI AudioThread(LPVOID) {
     wf.wBitsPerSample = 16;
     wf.nBlockAlign = wf.nChannels * wf.wBitsPerSample / 8;
     wf.nAvgBytesPerSec = wf.nSamplesPerSec * wf.nBlockAlign;
-    waveOutOpen(&hWave, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL);
 
+    waveOutOpen(&hWave, WAVE_MAPPER, &wf, 0, 0, CALLBACK_NULL);
     std::vector<short> buffer(SAMPLE_RATE / 20); // 50ms
 
     while (true) {
@@ -58,7 +65,10 @@ DWORD WINAPI AudioThread(LPVOID) {
             for (size_t i = 0; i < buffer.size(); ++i) {
                 phases[k] += 2.0 * M_PI * freq / SAMPLE_RATE;
                 if (phases[k] > 2.0 * M_PI) phases[k] -= 2.0 * M_PI;
-                buffer[i] += (short)(3000 * sin(phases[k]));
+                float sample = 3000 * sin(phases[k]) * gain.load();
+                if (sample > 32767) sample = 32767;
+                if (sample < -32768) sample = -32768;
+                buffer[i] += (short)sample;
             }
         }
 
@@ -68,15 +78,13 @@ DWORD WINAPI AudioThread(LPVOID) {
         waveOutPrepareHeader(hWave, &wh, sizeof(wh));
         waveOutWrite(hWave, &wh, sizeof(wh));
 
-        // wait for buffer duration before reusing
         Sleep(50);
         waveOutUnprepareHeader(hWave, &wh, sizeof(wh));
     }
     return 0;
 }
 
-
-// Draw the keys and their states
+// --- Draw keys ---
 void DrawKeys(HDC hdc, HWND hwnd) {
     RECT rect;
     GetClientRect(hwnd, &rect);
@@ -103,8 +111,14 @@ void DrawKeys(HDC hdc, HWND hwnd) {
         TextOutA(hdc, x + keyWidth/2 - 5, y + 5, keyChar, 1);
         TextOutA(hdc, x + 2, y + keyHeight/2, keyNotes[i].note, lstrlenA(keyNotes[i].note));
     }
+
+    // Draw gain value
+    char buf[32];
+    snprintf(buf, sizeof(buf), "Gain: %.2f", gain.load());
+    TextOutA(hdc, 350, 100, buf, lstrlenA(buf));
 }
 
+// --- Window procedure ---
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch(msg) {
         case WM_PAINT: {
@@ -117,6 +131,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_TIMER:
             InvalidateRect(hwnd, NULL, TRUE);
             break;
+        case WM_HSCROLL: {
+            if ((HWND)lParam == hSlider) {
+                int pos = SendMessage(hSlider, TBM_GETPOS, 0, 0);
+                gain = pos / 100.0f; // 0.0 -> 2.0
+            }
+            break;
+        }
         case WM_DESTROY:
             KillTimer(hwnd, 1);
             PostQuitMessage(0);
@@ -127,7 +148,13 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     return 0;
 }
 
+// --- WinMain ---
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
+    INITCOMMONCONTROLSEX icex = {};
+    icex.dwSize = sizeof(icex);
+    icex.dwICC = ICC_BAR_CLASSES;
+    InitCommonControlsEx(&icex);
+
     const char CLASS_NAME[] = "cpp-multi-synth";
 
     WNDCLASSA wc = {};
@@ -146,6 +173,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow) {
     ShowWindow(hwnd, nCmdShow);
 
     SetTimer(hwnd, 1, 10, NULL); // refresh 100Hz
+
+    // Create gain slider
+    hSlider = CreateWindowExA(
+        0, TRACKBAR_CLASS, NULL,
+        WS_CHILD | WS_VISIBLE | TBS_AUTOTICKS,
+        20, 100, 300, 30,
+        hwnd, (HMENU)101, hInstance, NULL
+    );
+    SendMessage(hSlider, TBM_SETRANGE, TRUE, MAKELONG(0, 200));
+    SendMessage(hSlider, TBM_SETPOS, TRUE, 100);
 
     // Start audio thread
     CreateThread(NULL, 0, AudioThread, NULL, 0, NULL);

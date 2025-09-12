@@ -1,1 +1,1 @@
-Compile and run: g++ src/main.cpp -o src/main.exe -mwindows && ./src/main -lwinmm
+Compile and run: g++ src/main.cpp -o src/main.exe -mwindows -lcomctl32 -lwinmm && ./src/main
